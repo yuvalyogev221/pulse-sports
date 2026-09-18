@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PULSE — Your world of sports</title>
+  <meta name="description" content="PULSE — תוצאות, משחקים, טבלאות, חדשות וחיפוש בעולם הספורט.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">P</div>
+        <div>
+          <div class="brand-name">PULSE</div>
+          <div class="brand-tag">Your world of sports</div>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button id="refreshBtn" class="icon-btn" title="רענון">↻</button>
+        <button id="menuBtn" class="icon-btn hamburger" title="תפריט">
+          <span></span><span></span><span></span>
+        </button>
+      </div>
+    </header>
+
+    <aside id="menu" class="side-menu">
+      <div class="menu-title">PULSE</div>
+      <button class="menu-item active" data-page="home">01 · בית</button>
+      <button class="menu-item" data-page="results">02 · תוצאות</button>
+      <button class="menu-item" data-page="upcoming">03 · משחקים</button>
+      <button class="menu-item" data-page="standings">04 · טבלאות</button>
+      <button class="menu-item" data-page="search">05 · חיפוש</button>
+    </aside>
+
+    <main id="viewport">
+      <section id="page-home" class="page active">
+        <div class="hero">
+          <div>
+            <div class="eyebrow">LIVE SPORTS HUB</div>
+            <h1>כל הספורט שלך,<br><span>במקום אחד.</span></h1>
+            <p>תוצאות, משחקים, חדשות וטבלאות — מתעדכנים אוטומטית.</p>
+          </div>
+          <div class="live-pill"><span></span> נתונים מתעדכנים</div>
+        </div>
+
+        <div id="homeResults" class="section-card collapsible">
+          <div class="section-head">
+            <h2>תוצאות המשחקים האחרונים</h2>
+            <button class="collapse-btn" aria-label="הסתר">↓</button>
+          </div>
+          <div class="section-body" id="homeResultsBody"><div class="loading">טוען…</div></div>
+        </div>
+
+        <div id="homeUpcoming" class="section-card collapsible">
+          <div class="section-head">
+            <h2>המשחקים הבאים</h2>
+            <button class="collapse-btn" aria-label="הסתר">↓</button>
+          </div>
+          <div class="section-body" id="homeUpcomingBody"><div class="loading">טוען…</div></div>
+        </div>
+
+        <div id="homeNews" class="section-card collapsible">
+          <div class="section-head">
+            <h2>חדשות וכתבות</h2>
+            <button class="collapse-btn" aria-label="הסתר">↓</button>
+          </div>
+          <div class="section-body" id="homeNewsBody"><div class="loading">טוען…</div></div>
+        </div>
+      </section>
+
+      <section id="page-results" class="page">
+        <div class="page-title">
+          <div class="eyebrow">PAGE 02</div>
+          <h1>תוצאות</h1>
+          <p>כל התוצאות בעונה הנוכחית, מסודרות לפי ליגה ותאריך.</p>
+        </div>
+        <div id="resultsBody"></div>
+      </section>
+
+      <section id="page-upcoming" class="page">
+        <div class="page-title">
+          <div class="eyebrow">PAGE 03</div>
+          <h1>המשחקים הבאים</h1>
+          <p>כל המשחקים הבאים בעונה הנוכחית, מסודרים לפי ליגה ותאריך.</p>
+        </div>
+        <div id="upcomingBody"></div>
+      </section>
+
+      <section id="page-standings" class="page">
+        <div class="page-title">
+          <div class="eyebrow">PAGE 04</div>
+          <h1>טבלאות</h1>
+          <p>מיקום הקבוצות בכל הליגות והמפעלים.</p>
+        </div>
+        <div id="standingsBody"></div>
+      </section>
+
+      <section id="page-search" class="page">
+        <div class="search-hero">
+          <div class="eyebrow">PAGE 05</div>
+          <h1>חיפוש</h1>
+          <p>חפש שחקנים וקבוצות בעברית או באנגלית.</p>
+          <div class="search-box">
+            <input id="searchInput" type="search" placeholder="למשל: LeBron James / לייקרס / הפועל ירושלים" autocomplete="off">
+            <button id="searchBtn">חיפוש</button>
+          </div>
+        </div>
+        <div id="searchBody"></div>
+      </section>
+    </main>
+
+    <footer>
+      <span>PULSE · Your world of sports</span>
+      <span id="updatedAt"></span>
+    </footer>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
