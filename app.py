@@ -458,8 +458,8 @@ def home_data():
     }
 
     # Resolve basketball team IDs once per day. This costs a small number of API calls.
-    lakers = cached("team-search:lakers", lambda: find_basketball_team_id("Los Angeles Lakers"), ttl=86400)
-    hapoel = cached("team-search:hapoel-jerusalem", lambda: find_basketball_team_id("Hapoel Jerusalem"), ttl=86400)
+    lakers = cached("team-search:lakers", lambda: find_basketball_team("Los Angeles Lakers"), ttl=86400)
+    hapoel = cached("team-search:hapoel-jerusalem", lambda: find_basketball_team("Hapoel Jerusalem"), ttl=86400)
 
     favorite_ids["lakers"] = {"sport": "basketball", "team_id": lakers, "league_keys": ["nba"]}
     favorite_ids["hapoel"] = {"sport": "basketball", "team_id": hapoel, "league_keys": ["winner"]}
