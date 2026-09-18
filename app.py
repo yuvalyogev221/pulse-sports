@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import html
-import re
+import os
 import time
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from threading import Lock
@@ -15,22 +14,32 @@ from flask import Flask, jsonify, render_template, request
 
 app = Flask(__name__)
 
-TSDB_BASE = "https://www.thesportsdb.com/api/v1/json/123"
+# ------------------------------------------------------------
+# PULSE data architecture
+# ------------------------------------------------------------
+# One API-Sports account/key is used for both Football and Basketball.
+# The browser NEVER receives this key. Requests are proxied through Flask.
+# ------------------------------------------------------------
+
+API_KEY = os.getenv("API_SPORTS_KEY", "").strip()
+
+FOOTBALL_BASE = "https://v3.football.api-sports.io"
+BASKETBALL_BASE = "https://v1.basketball.api-sports.io"
 NEWS_BASE = "https://news.google.com/rss/search"
 
-CACHE_TTL = 120
+CACHE_SECONDS = 600  # 10 minutes for normal pages
 
 session = requests.Session()
 session.headers.update({
-    "User-Agent": "PULSE Sports Dashboard/1.0",
-    "Accept": "application/json, text/plain, */*",
+    "User-Agent": "PULSE Sports Dashboard/2.0",
+    "Accept": "application/json",
 })
 
 cache: dict[str, tuple[float, Any]] = {}
 cache_lock = Lock()
 
 
-def cached(key: str, loader, ttl: int = CACHE_TTL):
+def cached(key: str, loader, ttl: int = CACHE_SECONDS):
     now = time.time()
     with cache_lock:
         hit = cache.get(key)
@@ -42,349 +51,483 @@ def cached(key: str, loader, ttl: int = CACHE_TTL):
     return value
 
 
-def get_json(url: str, params: dict[str, Any] | None = None, timeout: int = 15):
-    response = session.get(url, params=params, timeout=timeout)
-    response.raise_for_status()
-    return response.json()
+def current_football_season() -> int:
+    now = datetime.now(timezone.utc)
+    return now.year if now.month >= 7 else now.year - 1
 
 
-def safe_json(url: str, params: dict[str, Any] | None = None):
+def current_basketball_season() -> str:
+    now = datetime.now(timezone.utc)
+    start = now.year if now.month >= 9 else now.year - 1
+    return f"{start}-{start + 1}"
+
+
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def api_get(base: str, path: str, params: dict[str, Any] | None = None):
+    if not API_KEY:
+        raise RuntimeError(
+            "API_SPORTS_KEY is missing. Add the API-Sports key in Render Environment Variables."
+        )
+
+    url = f"{base}{path}"
     try:
-        return get_json(url, params)
-    except Exception as exc:
-        app.logger.warning("Upstream request failed: %s params=%r error=%s", url, params, exc)
+        r = session.get(url, params=params, headers={"x-apisports-key": API_KEY}, timeout=20)
+    except requests.RequestException as exc:
+        app.logger.warning("API network error: %s params=%r error=%s", url, params, exc)
+        raise
+
+    if r.status_code in (401, 403):
+        app.logger.warning(
+            "API authorization failed: status=%s url=%s params=%r",
+            r.status_code, url, params
+        )
+    elif r.status_code == 429:
+        app.logger.warning("API rate limit reached: %s params=%r", url, params)
+    r.raise_for_status()
+    return r.json()
+
+
+def safe_api_get(base: str, path: str, params: dict[str, Any] | None = None):
+    try:
+        return api_get(base, path, params)
+    except Exception:
         return {}
 
 
-def current_season_label() -> str:
-    now = datetime.now(timezone.utc)
-    start_year = now.year if now.month >= 7 else now.year - 1
-    return f"{start_year}-{start_year + 1}"
+# ------------------------------------------------------------
+# Competition configuration
+# ------------------------------------------------------------
 
-
-LEAGUES = [
-    {"key": "winner", "name": "Winner League", "name_he": "ליגת ווינר סל", "sport": "Basketball",
-     "tsdb_name": "Israeli Basketball Premier League", "tsdb_id": 4474},
-    {"key": "nba", "name": "NBA", "name_he": "NBA", "sport": "Basketball",
-     "tsdb_name": "NBA", "tsdb_id": 4387},
-    {"key": "premier", "name": "Premier League", "name_he": "Premier League", "sport": "Soccer",
-     "tsdb_name": "English Premier League", "tsdb_id": 4328},
-    {"key": "champions", "name": "UEFA Champions League", "name_he": "Champions League", "sport": "Soccer",
-     "tsdb_name": "UEFA Champions League", "tsdb_id": 4480},
-    {"key": "bundesliga", "name": "Bundesliga", "name_he": "Bundesliga", "sport": "Soccer",
-     "tsdb_name": "German Bundesliga", "tsdb_id": 4331},
-    {"key": "laliga", "name": "LaLiga", "name_he": "LaLiga", "sport": "Soccer",
-     "tsdb_name": "Spanish La Liga", "tsdb_id": 4335},
-    {"key": "seriea", "name": "Serie A", "name_he": "Serie A", "sport": "Soccer",
-     "tsdb_name": "Italian Serie A", "tsdb_id": 4332},
-    {"key": "ligue1", "name": "Ligue 1", "name_he": "Ligue 1", "sport": "Soccer",
-     "tsdb_name": "French Ligue 1", "tsdb_id": 4334},
-    {"key": "europa", "name": "UEFA Europa League", "name_he": "Europa League", "sport": "Soccer",
-     "tsdb_name": "UEFA Europa League", "tsdb_id": 4481},
+FOOTBALL_LEAGUES = [
+    {"key": "premier", "name": "Premier League", "name_he": "Premier League", "id": 39},
+    {"key": "champions", "name": "UEFA Champions League", "name_he": "Champions League", "id": 2},
+    {"key": "bundesliga", "name": "Bundesliga", "name_he": "Bundesliga", "id": 78},
+    {"key": "laliga", "name": "LaLiga", "name_he": "LaLiga", "id": 140},
+    {"key": "seriea", "name": "Serie A", "name_he": "Serie A", "id": 135},
+    {"key": "ligue1", "name": "Ligue 1", "name_he": "Ligue 1", "id": 61},
+    {"key": "europa", "name": "UEFA Europa League", "name_he": "Europa League", "id": 3},
 ]
 
-FAVORITE_TEAMS = [
-    {"key": "hapoel", "id": 137400, "label": "הפועל ירושלים"},
-    {"key": "lakers", "id": 134867, "label": "Los Angeles Lakers"},
-    {"key": "manutd", "id": 133612, "label": "Manchester United"},
+BASKETBALL_LEAGUES = [
+    {"key": "nba", "name": "NBA", "name_he": "NBA", "id": 12},
+    # API-Sports can change the numeric ID of smaller competitions in their catalogue.
+    # We resolve Israel's league once per process and cache it for a day.
+    {"key": "winner", "name": "Winner League", "name_he": "ליגת ווינר סל", "id": None},
 ]
 
 
-def parse_tsdb_datetime(date_str: str | None, time_str: str | None = None):
-    if not date_str:
+def resolve_winner_league_id():
+    def load():
+        data = safe_api_get(BASKETBALL_BASE, "/leagues", {"search": "Winner League"})
+        leagues = data.get("response") or []
+        # Prefer an Israel competition whose name contains winner/super league.
+        for item in leagues:
+            country = str(item.get("country", {}).get("name", "")).lower()
+            name = str(item.get("name", "")).lower()
+            if country == "israel" and ("winner" in name or "super" in name or "israel" in name):
+                return item.get("id")
+        # Next best: exact-ish name match.
+        for item in leagues:
+            name = str(item.get("name", "")).lower()
+            if "winner" in name:
+                return item.get("id")
         return None
-    value = date_str
-    if time_str:
-        value = f"{date_str} {time_str}"
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S%z"):
-        try:
-            dt = datetime.strptime(value, fmt)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
-        except ValueError:
-            pass
-    return None
+
+    return cached("winner-league-id", load, ttl=86400)
 
 
-def image_or_blank(value: str | None) -> str:
-    return value or ""
+def basketball_leagues():
+    result = []
+    for league in BASKETBALL_LEAGUES:
+        item = dict(league)
+        if item["id"] is None:
+            item["id"] = resolve_winner_league_id()
+        result.append(item)
+    return result
 
 
-def normalize_tsdb_event(e: dict[str, Any]) -> dict[str, Any]:
-    dt = parse_tsdb_datetime(e.get("dateEvent"), e.get("strTime"))
-    home_score = e.get("intHomeScore")
-    away_score = e.get("intAwayScore")
+# ------------------------------------------------------------
+# Normalization
+# ------------------------------------------------------------
 
-    def score(v):
-        if v in (None, "", "null"):
-            return None
-        try:
-            return int(v)
-        except Exception:
-            return v
+def normalize_football_fixture(item: dict[str, Any]) -> dict[str, Any]:
+    fixture = item.get("fixture") or {}
+    league = item.get("league") or {}
+    teams = item.get("teams") or {}
+    goals = item.get("goals") or {}
+    status = fixture.get("status") or {}
 
     return {
-        "id": e.get("idEvent"),
-        "date": dt.isoformat() if dt else None,
+        "id": fixture.get("id"),
+        "date": fixture.get("date"),
         "home": {
-            "id": e.get("idHomeTeam"),
-            "name": e.get("strHomeTeam") or "Unknown",
-            "logo": image_or_blank(e.get("strHomeTeamBadge")),
+            "id": (teams.get("home") or {}).get("id"),
+            "name": (teams.get("home") or {}).get("name") or "Unknown",
+            "logo": (teams.get("home") or {}).get("logo") or "",
         },
         "away": {
-            "id": e.get("idAwayTeam"),
-            "name": e.get("strAwayTeam") or "Unknown",
-            "logo": image_or_blank(e.get("strAwayTeamBadge")),
+            "id": (teams.get("away") or {}).get("id"),
+            "name": (teams.get("away") or {}).get("name") or "Unknown",
+            "logo": (teams.get("away") or {}).get("logo") or "",
         },
-        "home_score": score(home_score),
-        "away_score": score(away_score),
-        "status": "finished" if home_score not in (None, "") and away_score not in (None, "") else "notstarted",
-        "status_text": e.get("strStatus") or "",
-        "round": e.get("intRound"),
-        "tournament": e.get("strLeague"),
+        "home_score": goals.get("home"),
+        "away_score": goals.get("away"),
+        "status": status.get("short") or "",
+        "status_text": status.get("long") or "",
+        "round": league.get("round"),
+        "tournament": league.get("name"),
     }
 
 
-def find_tsdb_league(name: str):
-    for league in LEAGUES:
-        if league["tsdb_name"].lower() == name.lower():
-            return {"idLeague": str(league["tsdb_id"]), "strLeague": league["tsdb_name"]}
-    return None
+def normalize_basketball_game(item: dict[str, Any]) -> dict[str, Any]:
+    teams = item.get("teams") or {}
+    scores = item.get("scores") or {}
+    status = item.get("status") or {}
+    home_team = teams.get("home") or {}
+    away_team = teams.get("away") or {}
+    home_score = scores.get("home") or {}
+    away_score = scores.get("away") or {}
 
+    dt = item.get("date")
+    if dt and not str(dt).endswith("Z") and "+" not in str(dt):
+        dt = f"{dt}+00:00"
 
-def find_tsdb_season(league_id: str, target: str):
-    def load():
-        data = safe_json(f"{TSDB_BASE}/search_all_seasons.php", {"id": league_id})
-        seasons = data.get("seasons") or []
-        for s in seasons:
-            if s.get("strSeason") == target:
-                return target
-        return None
-    return cached(f"tsdb-season:{league_id}:{target}", load, ttl=3600)
-
-
-def tsdb_events_for_season(league_name: str):
-    league = find_tsdb_league(league_name)
-    if not league:
-        return []
-    league_id = str(league.get("idLeague"))
-    season = find_tsdb_season(league_id, current_season_label())
-    if not season:
-        return []
-    data = safe_json(f"{TSDB_BASE}/eventsseason.php", {"id": league_id, "s": season})
-    return [normalize_tsdb_event(e) for e in (data.get("events") or [])]
-
-
-def tsdb_league_window(league_name: str):
-    league = find_tsdb_league(league_name)
-    if not league:
-        return [], []
-    league_id = str(league.get("idLeague"))
-    upcoming = safe_json(f"{TSDB_BASE}/eventsnextleague.php", {"id": league_id}).get("events") or []
-    past = safe_json(f"{TSDB_BASE}/eventspastleague.php", {"id": league_id}).get("events") or []
-    return [normalize_tsdb_event(e) for e in past], [normalize_tsdb_event(e) for e in upcoming]
-
-
-def tsdb_team_events(team_id: int):
-    combined = []
-    found = set()
-    for league in LEAGUES:
-        try:
-            for event in tsdb_events_for_season(league["tsdb_name"]):
-                if str(event["home"]["id"]) == str(team_id) or str(event["away"]["id"]) == str(team_id):
-                    if event["id"] not in found:
-                        found.add(event["id"])
-                        combined.append(event)
-        except Exception:
-            continue
-
-    # If the current season is not yet populated, fall back to the provider's
-    # short team schedule endpoints.
-    if not combined:
-        data = safe_json(f"{TSDB_BASE}/eventsnext.php", {"id": team_id})
-        data2 = safe_json(f"{TSDB_BASE}/eventslast.php", {"id": team_id})
-        for event in (data.get("events") or []) + (data2.get("results") or []):
-            item = normalize_tsdb_event(event)
-            if item["id"] not in found:
-                found.add(item["id"])
-                combined.append(item)
-    return combined
-
-
-def league_events(league: dict[str, Any]):
-    events = tsdb_events_for_season(league["tsdb_name"])
-    if not events:
-        past, future = tsdb_league_window(league["tsdb_name"])
-        return past, future
-    return split_past_future(events)
-
-
-def soccer_table_from_events(events):
-    rows = {}
-    for e in events:
-        hs, aw = e.get("home_score"), e.get("away_score")
-        if hs is None or aw is None:
-            continue
-        for side in ("home", "away"):
-            t = e[side]
-            if not t.get("id"):
-                continue
-            r = rows.setdefault(str(t["id"]), {
-                "position": 0, "team_id": t["id"], "team": t["name"], "logo": t.get("logo", ""),
-                "played": 0, "wins": 0, "draws": 0, "losses": 0, "for": 0, "against": 0, "points": 0
-            })
-            r["played"] += 1
-            scored = hs if side == "home" else aw
-            conceded = aw if side == "home" else hs
-            r["for"] += scored
-            r["against"] += conceded
-            if scored > conceded:
-                r["wins"] += 1; r["points"] += 3
-            elif scored == conceded:
-                r["draws"] += 1; r["points"] += 1
-            else:
-                r["losses"] += 1
-    ordered = sorted(rows.values(), key=lambda r: (r["points"], r["for"]-r["against"], r["for"]), reverse=True)
-    for i, r in enumerate(ordered, start=1):
-        r["position"] = i
-    return ordered
-
-
-def basketball_table_from_events(events):
-    rows = {}
-    for e in events:
-        hs, aw = e.get("home_score"), e.get("away_score")
-        if hs is None or aw is None:
-            continue
-        for side in ("home", "away"):
-            t = e[side]
-            if not t.get("id"):
-                continue
-            r = rows.setdefault(str(t["id"]), {
-                "position": 0, "team_id": t["id"], "team": t["name"], "logo": t.get("logo", ""),
-                "played": 0, "wins": 0, "draws": 0, "losses": 0, "for": 0, "against": 0, "points": 0
-            })
-            r["played"] += 1
-            scored = hs if side == "home" else aw
-            conceded = aw if side == "home" else hs
-            r["for"] += scored; r["against"] += conceded
-            if scored > conceded:
-                r["wins"] += 1
-            else:
-                r["losses"] += 1
-            r["points"] = r["wins"]
-    ordered = sorted(rows.values(), key=lambda r: (r["wins"] / r["played"] if r["played"] else 0, r["wins"], r["for"]-r["against"]), reverse=True)
-    for i, r in enumerate(ordered, start=1):
-        r["position"] = i
-    return ordered
-
-
-def standings(league: dict[str, Any]):
-    def load():
-        # TheSportsDB has native tables for selected soccer leagues.
-        if league["sport"] == "Soccer":
-            data = safe_json(f"{TSDB_BASE}/lookuptable.php", {"l": league["tsdb_id"], "s": current_season_label()})
-            rows = []
-            for i, r in enumerate(data.get("table") or [], start=1):
-                rows.append({
-                    "position": r.get("intRank") or i,
-                    "team_id": r.get("idTeam"),
-                    "team": r.get("strTeam"),
-                    "logo": r.get("strTeamBadge") or r.get("strBadge") or "",
-                    "played": r.get("intPlayed"), "wins": r.get("intWin"), "draws": r.get("intDraw"),
-                    "losses": r.get("intLoss"), "for": r.get("intGoalsFor"), "against": r.get("intGoalsAgainst"),
-                    "points": r.get("intPoints"), "pct": None
-                })
-            if rows:
-                return [{"name": league["name_he"], "rows": rows}]
-
-        # Basketball tables are not provided as native free-tier tables, so build
-        # a simple W/L table from the current-season results.
-        events = tsdb_events_for_season(league["tsdb_name"])
-        rows = basketball_table_from_events(events) if league["sport"] == "Basketball" else soccer_table_from_events(events)
-        return [{"name": league["name_he"], "rows": rows}] if rows else []
-    return cached(f"standings:{league['key']}", load, ttl=300)
-
-
-def team_full(team_id: int):
-    data = safe_json(f"{TSDB_BASE}/lookupteam.php", {"id": team_id})
-    team = (data.get("teams") or [None])[0]
-    if not team:
-        return {}
     return {
-        "id": team.get("idTeam"),
-        "name": team.get("strTeam"),
-        "logo": team.get("strBadge") or "",
-        "country": team.get("strCountry"),
-        "sport": team.get("strSport"),
-        "city": team.get("strLocation"),
+        "id": item.get("id"),
+        "date": dt,
+        "home": {
+            "id": home_team.get("id"),
+            "name": home_team.get("name") or "Unknown",
+            "logo": home_team.get("logo") or "",
+        },
+        "away": {
+            "id": away_team.get("id"),
+            "name": away_team.get("name") or "Unknown",
+            "logo": away_team.get("logo") or "",
+        },
+        "home_score": home_score.get("total"),
+        "away_score": away_score.get("total"),
+        "status": status.get("short") or "",
+        "status_text": status.get("long") or status.get("short") or "",
+        "round": item.get("stage"),
+        "tournament": (item.get("league") or {}).get("name"),
     }
 
 
-def player_search(q: str):
-    data = safe_json(f"{TSDB_BASE}/searchplayers.php", {"p": q})
-    players = []
-    for p in data.get("player") or []:
-        dob = p.get("dateBorn")
-        age = None
-        if dob:
-            try:
-                birth = datetime.strptime(dob, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                age = datetime.now(timezone.utc).year - birth.year - (
-                    (datetime.now(timezone.utc).month, datetime.now(timezone.utc).day) <
-                    (birth.month, birth.day)
-                )
-            except Exception:
-                pass
-        players.append({
-            "id": p.get("idPlayer"),
-            "name": p.get("strPlayer"),
-            "sport": p.get("strSport"),
-            "country": p.get("strNationality"),
-            "team": p.get("strTeam"),
-            "age": age,
-            "shirt_number": p.get("strNumber"),
-            "image": p.get("strThumb") or p.get("strCutout") or "",
+# ------------------------------------------------------------
+# Fixtures
+# ------------------------------------------------------------
+
+def football_fixtures_for_league(league_id: int):
+    season = current_football_season()
+
+    def load():
+        data = safe_api_get(
+            FOOTBALL_BASE,
+            "/fixtures",
+            {"league": league_id, "season": season}
+        )
+        return [normalize_football_fixture(x) for x in (data.get("response") or [])]
+
+    return cached(f"football-fixtures:{league_id}:{season}", load, ttl=600)
+
+
+def basketball_fixtures_for_league(league_id: int | None):
+    if not league_id:
+        return []
+    season = current_basketball_season()
+
+    def load():
+        data = safe_api_get(
+            BASKETBALL_BASE,
+            "/games",
+            {"league": league_id, "season": season}
+        )
+        return [normalize_basketball_game(x) for x in (data.get("response") or [])]
+
+    return cached(f"basketball-fixtures:{league_id}:{season}", load, ttl=600)
+
+
+def split_past_future(events: list[dict[str, Any]]):
+    now = datetime.now(timezone.utc)
+    past, future = [], []
+
+    for event in events:
+        raw = event.get("date")
+        if not raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.astimezone(timezone.utc)
+        except ValueError:
+            continue
+
+        # Status codes make completed basketball games more reliable.
+        status = str(event.get("status", "")).upper()
+        is_finished = status in {
+            "FT", "AOT", "POST", "CANC", "ABD", "AWD", "WO", "FINAL", "FINISHED"
+        }
+        if is_finished or dt < now:
+            # Avoid putting an obviously upcoming, unstarted event into past.
+            if not is_finished and event.get("home_score") is None and event.get("away_score") is None:
+                future.append(event)
+            else:
+                past.append(event)
+        else:
+            future.append(event)
+
+    past.sort(key=lambda e: e.get("date") or "", reverse=True)
+    future.sort(key=lambda e: e.get("date") or "")
+    return past, future
+
+
+def all_league_fixture_data():
+    leagues = []
+
+    for league in FOOTBALL_LEAGUES:
+        events = football_fixtures_for_league(league["id"])
+        past, future = split_past_future(events)
+        leagues.append({
+            **league,
+            "sport": "football",
+            "events_past": past,
+            "events_future": future,
         })
-    return players[:10]
 
-
-def team_search(q: str):
-    data = safe_json(f"{TSDB_BASE}/searchteams.php", {"t": q})
-    teams = []
-    for t in data.get("teams") or []:
-        teams.append({
-            "id": t.get("idTeam"),
-            "name": t.get("strTeam"),
-            "sport": t.get("strSport"),
-            "country": t.get("strCountry"),
-            "logo": t.get("strBadge") or "",
+    for league in basketball_leagues():
+        events = basketball_fixtures_for_league(league["id"])
+        past, future = split_past_future(events)
+        leagues.append({
+            **league,
+            "sport": "basketball",
+            "events_past": past,
+            "events_future": future,
         })
-    return teams[:10]
 
+    # Keep the exact user-requested order: Winner, NBA, Premier, Champions, Bundesliga, LaLiga, Serie A, Ligue 1, Europa
+    order = ["winner", "nba", "premier", "champions", "bundesliga", "laliga", "seriea", "ligue1", "europa"]
+    rank = {key: i for i, key in enumerate(order)}
+    leagues.sort(key=lambda x: rank.get(x["key"], 999))
+    return leagues
+
+
+# ------------------------------------------------------------
+# Standings
+# ------------------------------------------------------------
+
+def football_standings(league_id: int):
+    season = current_football_season()
+
+    def load():
+        data = safe_api_get(
+            FOOTBALL_BASE,
+            "/standings",
+            {"league": league_id, "season": season}
+        )
+        tables = []
+        for group in data.get("response") or []:
+            league = group.get("league") or {}
+            for table in league.get("standings") or []:
+                rows = []
+                for row in table:
+                    team = row.get("team") or {}
+                    rows.append({
+                        "position": row.get("rank"),
+                        "team_id": team.get("id"),
+                        "team": team.get("name"),
+                        "logo": team.get("logo") or "",
+                        "played": (row.get("all") or {}).get("played"),
+                        "wins": (row.get("all") or {}).get("win"),
+                        "draws": (row.get("all") or {}).get("draw"),
+                        "losses": (row.get("all") or {}).get("lose"),
+                        "for": (row.get("all") or {}).get("goals", {}).get("for"),
+                        "against": (row.get("all") or {}).get("goals", {}).get("against"),
+                        "points": row.get("points"),
+                        "pct": None,
+                    })
+                tables.append({"name": table and league.get("name") or "Standings", "rows": rows})
+        return tables
+
+    return cached(f"football-standings:{league_id}:{season}", load, ttl=1200)
+
+
+def basketball_standings(league_id: int | None):
+    if not league_id:
+        return []
+
+    season = current_basketball_season()
+
+    def load():
+        data = safe_api_get(
+            BASKETBALL_BASE,
+            "/standings",
+            {"league": league_id, "season": season}
+        )
+        rows = []
+
+        for item in data.get("response") or []:
+            # API-Basketball has used a few response shapes over time.
+            team = item.get("team") or {}
+            rows.append({
+                "position": item.get("position") or item.get("rank"),
+                "team_id": team.get("id") or item.get("id"),
+                "team": team.get("name") or item.get("name"),
+                "logo": team.get("logo") or item.get("logo") or "",
+                "played": item.get("games") or item.get("played"),
+                "wins": item.get("wins"),
+                "draws": item.get("draws"),
+                "losses": item.get("losses"),
+                "for": item.get("for"),
+                "against": item.get("against"),
+                "points": item.get("points") or item.get("win"),
+                "pct": item.get("percentage"),
+            })
+
+        if rows:
+            rows.sort(key=lambda x: (x["position"] is None, x["position"] or 999))
+            return [{"name": "Standings", "rows": rows}]
+        return []
+
+    return cached(f"basketball-standings:{league_id}:{season}", load, ttl=1200)
+
+
+def all_standings():
+    output = []
+    for league in FOOTBALL_LEAGUES:
+        output.append({
+            **league,
+            "sport": "football",
+            "tables": football_standings(league["id"]),
+        })
+    for league in basketball_leagues():
+        output.append({
+            **league,
+            "sport": "basketball",
+            "tables": basketball_standings(league["id"]),
+        })
+
+    order = ["winner", "nba", "premier", "champions", "bundesliga", "laliga", "seriea", "ligue1", "europa"]
+    rank = {key: i for i, key in enumerate(order)}
+    output.sort(key=lambda x: rank.get(x["key"], 999))
+    return output
+
+
+# ------------------------------------------------------------
+# Favorites / home page
+# ------------------------------------------------------------
+
+def find_football_team_id(search: str):
+    data = safe_api_get(FOOTBALL_BASE, "/teams", {"search": search})
+    candidates = data.get("response") or []
+    if not candidates:
+        return None
+    # Prefer exact case-insensitive team name.
+    for item in candidates:
+        team = item.get("team") or {}
+        if str(team.get("name", "")).lower() == search.lower():
+            return team.get("id")
+    return (candidates[0].get("team") or {}).get("id")
+
+
+def find_basketball_team(search: str):
+    data = safe_api_get(BASKETBALL_BASE, "/teams", {"search": search})
+    candidates = data.get("response") or []
+    if not candidates:
+        return None
+    for item in candidates:
+        if str(item.get("name", "")).lower() == search.lower():
+            return item
+    return candidates[0]
+
+
+def home_data():
+    # Home uses the already-loaded league schedules whenever possible,
+    # avoiding extra API calls.
+    all_data = cached("all-league-fixtures", all_league_fixture_data, ttl=600)
+
+    league_by_key = {x["key"]: x for x in all_data}
+
+    # English Premier League: filter by Manchester United team id 33 (stable API ID).
+    favorite_ids = {
+        "manutd": {"sport": "football", "team_id": 33, "league_keys": ["premier"]},
+    }
+
+    # Resolve basketball team IDs once per day. This costs a small number of API calls.
+    lakers = cached("team-search:lakers", lambda: find_basketball_team_id("Los Angeles Lakers"), ttl=86400)
+    hapoel = cached("team-search:hapoel-jerusalem", lambda: find_basketball_team_id("Hapoel Jerusalem"), ttl=86400)
+
+    favorite_ids["lakers"] = {"sport": "basketball", "team_id": lakers, "league_keys": ["nba"]}
+    favorite_ids["hapoel"] = {"sport": "basketball", "team_id": hapoel, "league_keys": ["winner"]}
+
+    results = []
+    future = []
+
+    for fav in favorite_ids.values():
+        for league_key in fav["league_keys"]:
+            league = league_by_key.get(league_key)
+            if not league:
+                continue
+            team_id = fav["team_id"]
+            if not team_id:
+                continue
+
+            for event in league.get("events_past", []):
+                if str(event["home"]["id"]) == str(team_id) or str(event["away"]["id"]) == str(team_id):
+                    results.append(event)
+
+            for event in league.get("events_future", []):
+                if str(event["home"]["id"]) == str(team_id) or str(event["away"]["id"]) == str(team_id):
+                    future.append(event)
+
+    results.sort(key=lambda e: e.get("date") or "", reverse=True)
+    future.sort(key=lambda e: e.get("date") or "")
+
+    return {
+        "results": results[:60],
+        "upcoming": future[:60],
+        "news": latest_news(),
+        "updated_at": iso_now(),
+        "configured": bool(API_KEY),
+    }
+
+
+# ------------------------------------------------------------
+# News
+# ------------------------------------------------------------
 
 def latest_news():
     def load():
-        queries = ["Hapoel Jerusalem basketball", "Los Angeles Lakers", "Manchester United"]
-        all_items = []
+        queries = [
+            "Hapoel Jerusalem basketball",
+            "Los Angeles Lakers",
+            "Manchester United",
+        ]
+        items = []
+
         for query in queries:
             try:
-                r = session.get(
+                response = session.get(
                     NEWS_BASE,
                     params={"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"},
-                    timeout=10,
+                    timeout=12,
                 )
-                r.raise_for_status()
-                root = ET.fromstring(r.text)
+                response.raise_for_status()
+                root = ET.fromstring(response.text)
+
                 for item in root.findall("./channel/item"):
                     pub = item.findtext("pubDate") or ""
                     try:
                         dt = parsedate_to_datetime(pub).astimezone(timezone.utc)
                     except Exception:
                         dt = None
+
                     source = item.find("source")
-                    all_items.append({
+                    items.append({
                         "title": html.unescape(item.findtext("title") or ""),
                         "url": item.findtext("link") or "",
                         "source": source.text if source is not None else "News",
@@ -393,184 +536,342 @@ def latest_news():
                     })
             except Exception as exc:
                 app.logger.warning("News request failed: %s", exc)
-        dedup = {}
-        for item in all_items:
-            dedup[item["url"] or item["title"]] = item
-        items = list(dedup.values())
-        items.sort(key=lambda x: x["_stamp"], reverse=True)
-        for x in items:
-            x.pop("_stamp", None)
-        return items[:10]
+
+        unique = {}
+        for item in items:
+            unique[item["url"] or item["title"]] = item
+
+        result = list(unique.values())
+        result.sort(key=lambda x: x["_stamp"], reverse=True)
+        for item in result:
+            item.pop("_stamp", None)
+        return result[:10]
+
     return cached("news", load, ttl=300)
 
 
-def build_home():
-    results, upcoming = [], []
-    def one(team):
-        events = tsdb_team_events(team["id"])
-        past, future = split_past_future(events)
-        return team, past, future
+# ------------------------------------------------------------
+# Search
+# ------------------------------------------------------------
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = [pool.submit(one, t) for t in FAVORITE_TEAMS]
-        for future in futures:
-            team, past, future_events = future.result()
-            for e in past[:20]:
-                e["favorite_key"] = team["key"]
-                e["favorite_label"] = team["label"]
-                results.append(e)
-            for e in future_events[:20]:
-                e["favorite_key"] = team["key"]
-                e["favorite_label"] = team["label"]
-                upcoming.append(e)
+TEAM_ALIASES = {
+    "לייקרס": "Los Angeles Lakers",
+    "לוס אנג'לס לייקרס": "Los Angeles Lakers",
+    "הפועל ירושלים": "Hapoel Jerusalem",
+    "הפועל ירושלים כדורסל": "Hapoel Jerusalem",
+    "מנצ'סטר יונייטד": "Manchester United",
+    "מנצסטר יונייטד": "Manchester United",
+}
 
-    results.sort(key=lambda x: x.get("date") or "", reverse=True)
-    upcoming.sort(key=lambda x: x.get("date") or "")
+
+def translate_alias(q: str):
+    q_norm = q.strip().lower()
+    for he, en in TEAM_ALIASES.items():
+        if q_norm == he.lower():
+            return en
+    return q
+
+
+def search_football_players(q: str):
+    data = safe_api_get(
+        FOOTBALL_BASE,
+        "/players",
+        {"search": q, "season": current_football_season()}
+    )
+    output = []
+    for item in data.get("response") or []:
+        p = item.get("player") or {}
+        stats = (item.get("statistics") or [{}])[0]
+        team = stats.get("team") or {}
+        output.append({
+            "id": p.get("id"),
+            "name": p.get("name"),
+            "sport": "Football",
+            "country": p.get("nationality"),
+            "team": team.get("name"),
+            "age": p.get("age"),
+            "shirt_number": None,
+            "image": p.get("photo") or "",
+            "source": "football",
+        })
+    return output[:10]
+
+
+def search_basketball_players(q: str):
+    data = safe_api_get(BASKETBALL_BASE, "/players", {"search": q})
+    output = []
+    for p in data.get("response") or []:
+        team = p.get("team") or {}
+        output.append({
+            "id": p.get("id"),
+            "name": p.get("name"),
+            "sport": "Basketball",
+            "country": p.get("nationality"),
+            "team": team.get("name"),
+            "age": p.get("age"),
+            "shirt_number": p.get("number"),
+            "image": p.get("photo") or "",
+            "source": "basketball",
+        })
+    return output[:10]
+
+
+def search_football_teams(q: str):
+    data = safe_api_get(FOOTBALL_BASE, "/teams", {"search": q})
+    output = []
+    for item in data.get("response") or []:
+        t = item.get("team") or {}
+        output.append({
+            "id": t.get("id"),
+            "name": t.get("name"),
+            "sport": "Football",
+            "country": (t.get("country") or ""),
+            "logo": t.get("logo") or "",
+            "source": "football",
+        })
+    return output[:10]
+
+
+def search_basketball_teams(q: str):
+    data = safe_api_get(BASKETBALL_BASE, "/teams", {"search": q})
+    output = []
+    for t in data.get("response") or []:
+        output.append({
+            "id": t.get("id"),
+            "name": t.get("name"),
+            "sport": "Basketball",
+            "country": (t.get("country") or {}).get("name") if isinstance(t.get("country"), dict) else t.get("country"),
+            "logo": t.get("logo") or "",
+            "source": "basketball",
+        })
+    return output[:10]
+
+
+def search_all(q: str):
+    q = translate_alias(q)
+    # Do the two sports in sequence to keep API rate use predictable.
+    football_players = search_football_players(q) if len(q) >= 3 else []
+    basketball_players = search_basketball_players(q) if len(q) >= 3 else []
+    football_teams = search_football_teams(q) if len(q) >= 3 else []
+    basketball_teams = search_basketball_teams(q) if len(q) >= 3 else []
+
     return {
-        "results": results[:60],
-        "upcoming": upcoming[:60],
-        "news": latest_news(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "query": q,
+        "players": (football_players + basketball_players)[:10],
+        "teams": (football_teams + basketball_teams)[:10],
     }
 
+
+def football_player_profile(player_id: int):
+    data = safe_api_get(
+        FOOTBALL_BASE,
+        "/players",
+        {"id": player_id, "season": current_football_season()}
+    )
+    item = (data.get("response") or [None])[0]
+    if not item:
+        return {}
+    p = item.get("player") or {}
+    stats = (item.get("statistics") or [{}])[0]
+    team = stats.get("team") or {}
+    return {
+        "id": p.get("id"),
+        "name": p.get("name"),
+        "image": p.get("photo") or "",
+        "team": team.get("name"),
+        "team_id": team.get("id"),
+        "team_logo": team.get("logo") or "",
+        "age": p.get("age"),
+        "shirt_number": stats.get("games", {}).get("number"),
+        "country": p.get("nationality"),
+    }
+
+
+def basketball_player_profile(player_id: int):
+    data = safe_api_get(BASKETBALL_BASE, "/players", {"id": player_id})
+    p = (data.get("response") or [None])[0]
+    if not p:
+        return {}
+    team = p.get("team") or {}
+    return {
+        "id": p.get("id"),
+        "name": p.get("name"),
+        "image": p.get("photo") or "",
+        "team": team.get("name"),
+        "team_id": team.get("id"),
+        "team_logo": team.get("logo") or "",
+        "age": p.get("age"),
+        "shirt_number": p.get("number"),
+        "country": p.get("nationality"),
+    }
+
+
+def football_team_profile(team_id: int):
+    data = safe_api_get(FOOTBALL_BASE, "/teams", {"id": team_id})
+    item = (data.get("response") or [None])[0]
+    if not item:
+        return {}
+    t = item.get("team") or {}
+    return {
+        "id": t.get("id"),
+        "name": t.get("name"),
+        "logo": t.get("logo") or "",
+        "country": t.get("country") or "",
+        "sport": "Football",
+        "city": (item.get("venue") or {}).get("city"),
+    }
+
+
+def basketball_team_profile(team_id: int):
+    data = safe_api_get(BASKETBALL_BASE, "/teams", {"id": team_id})
+    t = (data.get("response") or [None])[0]
+    if not t:
+        return {}
+    country = t.get("country")
+    country_name = country.get("name") if isinstance(country, dict) else country
+    return {
+        "id": t.get("id"),
+        "name": t.get("name"),
+        "logo": t.get("logo") or "",
+        "country": country_name or "",
+        "sport": "Basketball",
+        "city": t.get("city"),
+    }
+
+
+def team_profile(team_id: int, source: str):
+    if source == "basketball":
+        details = basketball_team_profile(team_id)
+        # Load team games in current season.
+        season = current_basketball_season()
+        data = safe_api_get(
+            BASKETBALL_BASE,
+            "/games",
+            {"team": team_id, "season": season}
+        )
+        events = [normalize_basketball_game(x) for x in (data.get("response") or [])]
+    else:
+        details = football_team_profile(team_id)
+        season = current_football_season()
+        data = safe_api_get(
+            FOOTBALL_BASE,
+            "/fixtures",
+            {"team": team_id, "season": season}
+        )
+        events = [normalize_football_fixture(x) for x in (data.get("response") or [])]
+
+    past, future = split_past_future(events)
+
+    positions = []
+    for league in all_standings():
+        for table in league.get("tables", []):
+            for row in table.get("rows", []):
+                if str(row.get("team_id")) == str(team_id):
+                    positions.append({
+                        "league": league["name_he"],
+                        "position": row.get("position"),
+                    })
+
+    return {
+        **details,
+        "standings": positions,
+        "last": past[0] if past else None,
+        "next": future[0] if future else None,
+    }
+
+
+# ------------------------------------------------------------
+# Flask routes
+# ------------------------------------------------------------
 
 @app.get("/")
 def index():
     return render_template("index.html")
 
 
+@app.get("/health")
+def health():
+    return jsonify({"status": "ok", "api_key_configured": bool(API_KEY)})
+
+
 @app.get("/api/home")
 def api_home():
-    return jsonify(cached("home", build_home))
+    return jsonify(cached("home", home_data, ttl=600))
 
 
 @app.get("/api/results")
 def api_results():
-    def load():
-        out = []
-        for league in LEAGUES:
-            try:
-                past, _ = league_events(league)
-            except Exception:
-                past = []
-            out.append({
-                "key": league["key"],
-                "name": league["name"],
-                "name_he": league["name_he"],
-                "events": past,
-            })
-        return out
-    return jsonify({"leagues": cached("league-results", load)})
+    data = cached("all-league-fixtures", all_league_fixture_data, ttl=600)
+    return jsonify({
+        "leagues": [
+            {
+                "key": x["key"],
+                "name": x["name"],
+                "name_he": x["name_he"],
+                "sport": x["sport"],
+                "events": x["events_past"],
+            }
+            for x in data
+        ],
+        "updated_at": iso_now(),
+        "configured": bool(API_KEY),
+    })
 
 
 @app.get("/api/upcoming")
 def api_upcoming():
-    def load():
-        out = []
-        for league in LEAGUES:
-            try:
-                _, future = league_events(league)
-            except Exception:
-                future = []
-            out.append({
-                "key": league["key"],
-                "name": league["name"],
-                "name_he": league["name_he"],
-                "events": future,
-            })
-        return out
-    return jsonify({"leagues": cached("league-upcoming", load)})
+    data = cached("all-league-fixtures", all_league_fixture_data, ttl=600)
+    return jsonify({
+        "leagues": [
+            {
+                "key": x["key"],
+                "name": x["name"],
+                "name_he": x["name_he"],
+                "sport": x["sport"],
+                "events": x["events_future"],
+            }
+            for x in data
+        ],
+        "updated_at": iso_now(),
+        "configured": bool(API_KEY),
+    })
 
 
 @app.get("/api/standings")
 def api_standings():
-    def load():
-        out = []
-        for league in LEAGUES:
-            try:
-                tables = standings(league)
-            except Exception:
-                tables = []
-            out.append({
-                "key": league["key"],
-                "name": league["name"],
-                "name_he": league["name_he"],
-                "tables": tables,
-            })
-        return out
-    return jsonify({"leagues": cached("standings-all", load, ttl=300)})
+    return jsonify({
+        "leagues": cached("all-standings", all_standings, ttl=1200),
+        "updated_at": iso_now(),
+        "configured": bool(API_KEY),
+    })
 
 
 @app.get("/api/search")
 def api_search():
     q = request.args.get("q", "").strip()
-    if not q:
+    if not q or len(q) < 3:
         return jsonify({"query": q, "players": [], "teams": []})
-    return jsonify({
-        "query": q,
-        "players": cached(f"player-search:{q.lower()}", lambda: player_search(q), ttl=300),
-        "teams": cached(f"team-search:{q.lower()}", lambda: team_search(q), ttl=300),
-    })
+    return jsonify(cached(
+        f"search:{q.lower()}",
+        lambda: search_all(q),
+        ttl=600
+    ))
 
 
-@app.get("/api/player/<int:player_id>")
-def api_player(player_id: int):
-    data = safe_json(f"{TSDB_BASE}/lookupplayer.php", {"id": player_id})
-    p = (data.get("players") or [None])[0]
-    if not p:
-        return jsonify({})
-    dob = p.get("dateBorn")
-    age = None
-    if dob:
-        try:
-            birth = datetime.strptime(dob, "%Y-%m-%d")
-            today = datetime.now()
-            age = today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
-        except Exception:
-            pass
-    return jsonify({
-        "id": p.get("idPlayer"),
-        "name": p.get("strPlayer"),
-        "image": p.get("strThumb") or p.get("strCutout") or "",
-        "team": p.get("strTeam"),
-        "team_id": p.get("idTeam"),
-        "team_logo": "",
-        "age": age,
-        "shirt_number": p.get("strNumber"),
-        "country": p.get("strNationality"),
-    })
+@app.get("/api/player/<source>/<int:player_id>")
+def api_player(source: str, player_id: int):
+    if source == "basketball":
+        return jsonify(basketball_player_profile(player_id))
+    return jsonify(football_player_profile(player_id))
 
 
-@app.get("/api/team/<int:team_id>")
-def api_team(team_id: int):
-    details = team_full(team_id)
-    events = tsdb_team_events(team_id)
-    past, future = split_past_future(events)
-
-    positions = []
-    for league in LEAGUES:
-        try:
-            for table in standings(league):
-                for row in table["rows"]:
-                    if str(row["team_id"]) == str(team_id):
-                        positions.append({
-                            "league": league["name_he"],
-                            "position": row["position"],
-                        })
-        except Exception:
-            continue
-
-    return jsonify({
-        **details,
-        "standings": positions,
-        "last": past[0] if past else None,
-        "next": future[0] if future else None,
-    })
-
-
-@app.get("/health")
-def health():
-    return jsonify({"status": "ok"})
+@app.get("/api/team/<source>/<int:team_id>")
+def api_team(source: str, team_id: int):
+    return jsonify(cached(
+        f"team-profile:{source}:{team_id}",
+        lambda: team_profile(team_id, source),
+        ttl=600
+    ))
 
 
 if __name__ == "__main__":
