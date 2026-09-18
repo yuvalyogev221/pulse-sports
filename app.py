@@ -15,7 +15,7 @@ from flask import Flask, jsonify, render_template, request
 
 app = Flask(__name__)
 
-API_BASE = "https://www.sofascore.com/api/v1"
+API_BASE = "https://api.sofascore.com/api/v1"
 NEWS_BASE = "https://news.google.com/rss/search"
 CACHE_TTL = 60
 MAX_PAGES = 40
@@ -51,7 +51,8 @@ def get_json(path: str, params: dict[str, Any] | None = None, timeout: int = 12)
 def safe_get_json(path: str, params: dict[str, Any] | None = None):
     try:
         return get_json(path, params)
-    except Exception:
+    except Exception as exc:
+        app.logger.warning("Upstream API request failed: %s params=%r error=%s", path, params, exc)
         return {}
 
 
