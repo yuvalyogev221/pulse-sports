@@ -45,29 +45,34 @@
             <h1>כל הספורט שלך,<br><span>במקום אחד.</span></h1>
             <p>תוצאות, משחקים, חדשות וטבלאות — מתעדכנים אוטומטית.</p>
           </div>
-          <div class="live-pill"><span></span> נתונים מתעדכנים</div>
+          <div id="apiStatusPill" class="live-pill"><span></span> נתונים מתעדכנים</div>
         </div>
 
-        <div id="homeResults" class="section-card collapsible">
+        <div id="setupNotice" class="setup-notice hidden">
+          <strong>צריך לחבר את PULSE ל־API.</strong>
+          <span>ב־Render הוסף Environment Variable בשם <code>API_SPORTS_KEY</code> עם המפתח שקיבלת מ־API‑Sports.</span>
+        </div>
+
+        <div class="section-card collapsible">
           <div class="section-head">
             <h2>תוצאות המשחקים האחרונים</h2>
-            <button class="collapse-btn" aria-label="הסתר">↓</button>
+            <button class="collapse-btn">↓</button>
           </div>
           <div class="section-body" id="homeResultsBody"><div class="loading">טוען…</div></div>
         </div>
 
-        <div id="homeUpcoming" class="section-card collapsible">
+        <div class="section-card collapsible">
           <div class="section-head">
             <h2>המשחקים הבאים</h2>
-            <button class="collapse-btn" aria-label="הסתר">↓</button>
+            <button class="collapse-btn">↓</button>
           </div>
           <div class="section-body" id="homeUpcomingBody"><div class="loading">טוען…</div></div>
         </div>
 
-        <div id="homeNews" class="section-card collapsible">
+        <div class="section-card collapsible">
           <div class="section-head">
             <h2>חדשות וכתבות</h2>
-            <button class="collapse-btn" aria-label="הסתר">↓</button>
+            <button class="collapse-btn">↓</button>
           </div>
           <div class="section-body" id="homeNewsBody"><div class="loading">טוען…</div></div>
         </div>
