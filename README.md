@@ -4,6 +4,8 @@ PULSE is a Flask sports dashboard built from the supplied product specification.
 
 ## Why this rebuild is different
 
+Version 3 adds a build identifier and provider indicator to `/health` and `/api/home` so the deployed version can be verified immediately.
+
 The previous versions depended on public web endpoints that returned HTTP 403 from Render. This rebuild does **not** use SofaScore or ESPN.
 
 The sports-data layer uses **API-Sports**, with one API key shared between its Football and Basketball products. The key is kept server-side in the `API_SPORTS_KEY` environment variable.
@@ -85,3 +87,24 @@ PULSE_REBUILT/
 ## Important
 
 The free plan has request quotas. For a high-traffic public product, use a paid/production API plan and increase caching/storage accordingly.
+
+
+## Verify the deployed build
+
+Open:
+
+`https://YOUR-RENDER-URL/health`
+
+Expected JSON includes:
+
+- `"status": "ok"`
+- `"build": "pulse-api-sports-v3"`
+- `"provider": "API-Sports"`
+
+If the word `TheSportsDB`, `ESPN`, or `SofaScore` appears in the Render log after deploying v3, the old code is still being served by that Render service/branch.
+
+## Troubleshooting
+
+After deployment, open `/api/diagnostics`. It checks the API-Sports account status, one Premier League fixtures request, and one NBA request. It returns the provider's `errors` field so configuration/quota problems are visible instead of being silently rendered as empty sections.
+
+For NBA, API-NBA currently uses `https://v2.nba.api-sports.io`, the league value `standard`, and four-digit season values such as `2026`.
