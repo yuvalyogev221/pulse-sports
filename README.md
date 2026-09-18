@@ -1,51 +1,74 @@
 # PULSE — Your world of sports
 
-PULSE is a Flask sports dashboard built from the requirements in the supplied specification.
+PULSE is a Flask sports dashboard built from the supplied product specification.
 
-## Included
+## Why this rebuild is different
+
+The previous versions depended on public web endpoints that returned HTTP 403 from Render. This rebuild does **not** use SofaScore or ESPN.
+
+The sports-data layer uses **API-Sports**, with one API key shared between its Football and Basketball products. The key is kept server-side in the `API_SPORTS_KEY` environment variable.
+
+## Features
 
 - 5 pages: Home, Results, Upcoming Games, Standings, Search
 - RTL Hebrew UI
-- Matte black modern sports design
-- Manual page navigation + swipe navigation on touch devices
+- Matte-black modern sports design
+- Mobile responsive
+- Swipe navigation
+- Collapsible sections
+- Manual refresh + 60-second home refresh
+- Israel timezone
 - Home favorites: Hapoel Jerusalem, Los Angeles Lakers, Manchester United
-- Results and upcoming games grouped by league
-- Current-season schedules
-- League standings
-- Search for teams and players
-- Player profile details
-- Team profile with standings positions + previous/next game
-- 60-second automatic refresh of home data
-- Manual refresh button
-- Loading / empty / error-safe UI
-- Israel time zone (Asia/Jerusalem)
-- YYYY/MM/DD display format
+- Football: Premier League, Champions League, Bundesliga, LaLiga, Serie A, Ligue 1, Europa League
+- Basketball: NBA and Winner League (resolved from the API catalogue)
+- Player and team search
+- Player/team detail screens
+- News via Google News RSS
+- `/health` deployment check
+- Friendly configuration screen when the API key is missing
 
-## Data provider
+## API key
 
-The backend uses the public Sofascore API endpoints documented by community-maintained API references. The app keeps the data provider behind Flask routes so the browser never has to know the upstream endpoints.
+1. Create a free API-Sports account at:
+   https://dashboard.api-football.com/
+2. Copy the API key from your dashboard.
+3. In Render open:
+   **Service → Environment → Add Environment Variable**
+4. Add:
+   - Key: `API_SPORTS_KEY`
+   - Value: your API key
+5. Save and redeploy.
 
-News are collected from Google News RSS searches and combined into the 10 newest unique articles.
+The current API-Sports free plan is documented as 100 requests/day. The integration therefore caches league data for 10 minutes and standings for 20 minutes.
 
-## Run locally
+## Local run
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+export API_SPORTS_KEY="YOUR_KEY"
 python app.py
 ```
 
-Then open:
-
+Open:
 http://127.0.0.1:5000
 
-## GitHub
+## Render
 
-Create a new GitHub repository and upload the project root:
+Build Command:
+`pip install -r requirements.txt`
+
+Start Command:
+`gunicorn app:app`
+
+Health Check:
+`/health`
+
+## GitHub structure
 
 ```text
-pulse_sports/
+PULSE_REBUILT/
 ├── app.py
 ├── requirements.txt
 ├── Procfile
@@ -59,22 +82,6 @@ pulse_sports/
     └── style.css
 ```
 
-## Render
+## Important
 
-Option A — connect the GitHub repository as a new Web Service.
-
-Use:
-
-- Language: Python
-- Build Command: `pip install -r requirements.txt`
-- Start Command: `gunicorn app:app`
-- Health Check Path: `/health`
-
-The included `render.yaml` can also be used as the service blueprint.
-
-## Important notes
-
-1. The app is designed to fail gracefully if an upstream sports/news source is temporarily unavailable.
-2. Current-season data is resolved dynamically rather than hardcoding `2026/27`, so the app can roll forward into future seasons.
-3. The public upstream API is not an official contractual feed for PULSE. For a commercial/public product, replace it with a licensed sports-data provider later.
-4. If your provider changes endpoints or rate limits, the frontend does not need to change; update only `app.py`.
+The free plan has request quotas. For a high-traffic public product, use a paid/production API plan and increase caching/storage accordingly.
