@@ -13,6 +13,8 @@ import requests
 from flask import Flask, jsonify, render_template, request
 
 app = Flask(__name__)
+BUILD_ID = "pulse-api-sports-v3"
+DATA_PROVIDER = "API-Sports"
 
 # ------------------------------------------------------------
 # PULSE data architecture
@@ -439,8 +441,9 @@ def find_basketball_team(search: str):
     candidates = data.get("response") or []
     if not candidates:
         return None
+    search_norm = search.strip().lower()
     for item in candidates:
-        if str(item.get("name", "")).lower() == search.lower():
+        if str(item.get("name", "")).strip().lower() == search_norm:
             return item
     return candidates[0]
 
@@ -448,7 +451,11 @@ def find_basketball_team(search: str):
 def home_data():
     # Home uses the already-loaded league schedules whenever possible,
     # avoiding extra API calls.
-    all_data = cached("all-league-fixtures", all_league_fixture_data, ttl=600)
+    try:
+        all_data = cached("all-league-fixtures", all_league_fixture_data, ttl=600)
+    except Exception as exc:
+        app.logger.exception("Home fixture aggregation failed: %s", exc)
+        all_data = []
 
     league_by_key = {x["key"]: x for x in all_data}
 
@@ -458,8 +465,16 @@ def home_data():
     }
 
     # Resolve basketball team IDs once per day. This costs a small number of API calls.
-    lakers = cached("team-search:lakers", lambda: find_basketball_team("Los Angeles Lakers"), ttl=86400)
-    hapoel = cached("team-search:hapoel-jerusalem", lambda: find_basketball_team("Hapoel Jerusalem"), ttl=86400)
+    lakers = cached(
+        "team-search:lakers",
+        lambda: (find_basketball_team("Los Angeles Lakers") or {}).get("id"),
+        ttl=86400
+    )
+    hapoel = cached(
+        "team-search:hapoel-jerusalem",
+        lambda: (find_basketball_team("Hapoel Jerusalem") or {}).get("id"),
+        ttl=86400
+    )
 
     favorite_ids["lakers"] = {"sport": "basketball", "team_id": lakers, "league_keys": ["nba"]}
     favorite_ids["hapoel"] = {"sport": "basketball", "team_id": hapoel, "league_keys": ["winner"]}
@@ -493,6 +508,8 @@ def home_data():
         "news": latest_news(),
         "updated_at": iso_now(),
         "configured": bool(API_KEY),
+        "build": BUILD_ID,
+        "provider": DATA_PROVIDER,
     }
 
 
@@ -791,11 +808,26 @@ def index():
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "api_key_configured": bool(API_KEY)})
+    return jsonify({
+        "status": "ok",
+        "build": BUILD_ID,
+        "provider": DATA_PROVIDER,
+        "api_key_configured": bool(API_KEY),
+    })
 
 
 @app.get("/api/home")
 def api_home():
+    if not API_KEY:
+        payload = {
+            "results": [],
+            "upcoming": [],
+            "news": latest_news(),
+            "updated_at": iso_now(),
+            "configured": False,
+            "error": "API_SPORTS_KEY is missing in Render Environment Variables."
+        }
+        return jsonify(payload), 200
     return jsonify(cached("home", home_data, ttl=600))
 
 
