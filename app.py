@@ -27,6 +27,7 @@ API_KEY = os.getenv("API_SPORTS_KEY", "").strip()
 
 FOOTBALL_BASE = "https://v3.football.api-sports.io"
 BASKETBALL_BASE = "https://v1.basketball.api-sports.io"
+NBA_BASE = "https://v2.nba.api-sports.io"
 NEWS_BASE = "https://news.google.com/rss/search"
 
 CACHE_SECONDS = 600  # 10 minutes for normal pages
@@ -58,10 +59,9 @@ def current_football_season() -> int:
     return now.year if now.month >= 7 else now.year - 1
 
 
-def current_basketball_season() -> str:
+def current_basketball_season() -> int:
     now = datetime.now(timezone.utc)
-    start = now.year if now.month >= 9 else now.year - 1
-    return f"{start}-{start + 1}"
+    return now.year if now.month >= 9 else now.year - 1
 
 
 def iso_now() -> str:
@@ -98,6 +98,16 @@ def safe_api_get(base: str, path: str, params: dict[str, Any] | None = None):
     except Exception:
         return {}
 
+def api_error(payload: dict[str, Any]) -> str | None:
+    errors = payload.get("errors")
+    if not errors:
+        return None
+    if isinstance(errors, dict):
+        return "; ".join(f"{k}: {v}" for k, v in errors.items())
+    if isinstance(errors, list):
+        return "; ".join(str(v) for v in errors)
+    return str(errors)
+
 
 # ------------------------------------------------------------
 # Competition configuration
@@ -114,7 +124,7 @@ FOOTBALL_LEAGUES = [
 ]
 
 BASKETBALL_LEAGUES = [
-    {"key": "nba", "name": "NBA", "name_he": "NBA", "id": 12},
+    {"key": "nba", "name": "NBA", "name_he": "NBA", "id": "standard"},
     # API-Sports can change the numeric ID of smaller competitions in their catalogue.
     # We resolve Israel's league once per process and cache it for a day.
     {"key": "winner", "name": "Winner League", "name_he": "ליגת ווינר סל", "id": None},
@@ -237,6 +247,20 @@ def football_fixtures_for_league(league_id: int):
     return cached(f"football-fixtures:{league_id}:{season}", load, ttl=600)
 
 
+def nba_fixtures_for_season():
+    season = current_basketball_season()
+
+    def load():
+        data = safe_api_get(
+            NBA_BASE,
+            "/games",
+            {"league": "standard", "season": season}
+        )
+        return [normalize_basketball_game(x) for x in (data.get("response") or [])]
+
+    return cached(f"nba-fixtures:{season}", load, ttl=1800)
+
+
 def basketball_fixtures_for_league(league_id: int | None):
     if not league_id:
         return []
@@ -250,7 +274,7 @@ def basketball_fixtures_for_league(league_id: int | None):
         )
         return [normalize_basketball_game(x) for x in (data.get("response") or [])]
 
-    return cached(f"basketball-fixtures:{league_id}:{season}", load, ttl=600)
+    return cached(f"basketball-fixtures:{league_id}:{season}", load, ttl=1800)
 
 
 def split_past_future(events: list[dict[str, Any]]):
@@ -302,7 +326,7 @@ def all_league_fixture_data():
         })
 
     for league in basketball_leagues():
-        events = basketball_fixtures_for_league(league["id"])
+        events = nba_fixtures_for_season() if league["key"] == "nba" else basketball_fixtures_for_league(league["id"])
         past, future = split_past_future(events)
         leagues.append({
             **league,
@@ -358,18 +382,16 @@ def football_standings(league_id: int):
     return cached(f"football-standings:{league_id}:{season}", load, ttl=1200)
 
 
-def basketball_standings(league_id: int | None):
+def basketball_standings(league_id: int | str | None, is_nba: bool = False):
     if not league_id:
         return []
 
     season = current_basketball_season()
+    base = NBA_BASE if is_nba else BASKETBALL_BASE
+    params = {"league": "standard", "season": season} if is_nba else {"league": league_id, "season": season}
 
     def load():
-        data = safe_api_get(
-            BASKETBALL_BASE,
-            "/standings",
-            {"league": league_id, "season": season}
-        )
+        data = safe_api_get(base, "/standings", params)
         rows = []
 
         for item in data.get("response") or []:
@@ -410,7 +432,7 @@ def all_standings():
         output.append({
             **league,
             "sport": "basketball",
-            "tables": basketball_standings(league["id"]),
+            "tables": basketball_standings(league["id"], is_nba=(league["key"] == "nba")),
         })
 
     order = ["winner", "nba", "premier", "champions", "bundesliga", "laliga", "seriea", "ligue1", "europa"]
@@ -813,6 +835,27 @@ def health():
         "build": BUILD_ID,
         "provider": DATA_PROVIDER,
         "api_key_configured": bool(API_KEY),
+    })
+
+@app.get("/api/diagnostics")
+def diagnostics():
+    if not API_KEY:
+        return jsonify({"ok": False, "message": "API_SPORTS_KEY is missing."})
+
+    football = safe_api_get(FOOTBALL_BASE, "/status")
+    premier = safe_api_get(FOOTBALL_BASE, "/fixtures", {"league": 39, "season": current_football_season(), "next": 1})
+    nba = safe_api_get(NBA_BASE, "/games", {"league": "standard", "season": current_basketball_season(), "next": 1})
+
+    checks = {
+        "football_status": {"results": football.get("results"), "error": api_error(football)},
+        "premier_league": {"results": premier.get("results"), "error": api_error(premier)},
+        "nba": {"results": nba.get("results"), "error": api_error(nba)},
+    }
+    return jsonify({
+        "ok": all(c["error"] is None for c in checks.values()),
+        "build": BUILD_ID,
+        "provider": DATA_PROVIDER,
+        "checks": checks,
     })
 
 
